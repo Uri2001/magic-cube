@@ -310,6 +310,15 @@
       B: { axis: 'z', layer: -1, direction: 1, normal: new THREE.Vector3(0, 0, -1), color: 0x2878e6 }
     };
 
+    const localFaceCandidates = [
+      { axis: 'x', layer: 1, normal: new THREE.Vector3(1, 0, 0) },
+      { axis: 'x', layer: -1, normal: new THREE.Vector3(-1, 0, 0) },
+      { axis: 'y', layer: 1, normal: new THREE.Vector3(0, 1, 0) },
+      { axis: 'y', layer: -1, normal: new THREE.Vector3(0, -1, 0) },
+      { axis: 'z', layer: 1, normal: new THREE.Vector3(0, 0, 1) },
+      { axis: 'z', layer: -1, normal: new THREE.Vector3(0, 0, -1) }
+    ];
+
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
     const cameraDirection = new THREE.Vector3(5.4, 4.3, 6.1).normalize();
@@ -493,12 +502,10 @@
       const key = event.key.toUpperCase();
       if (faceDefs[key]) {
         event.preventDefault();
-        const def = faceDefs[key];
         enqueueMove({
           face: key,
-          axis: def.axis,
-          layer: def.layer,
-          direction: event.shiftKey ? -def.direction : def.direction
+          reverse: event.shiftKey,
+          visualFace: true
         });
         return;
       }
@@ -563,6 +570,42 @@
       return raycaster.intersectObjects(stickerMeshes, false)[0] ?? null;
     }
 
+    function resolveVisualFaceMove(face) {
+      rubikGroup.updateMatrixWorld(true);
+      const targetNormal = getVisualTargetNormal(face);
+      const cubeRotation = rubikGroup.getWorldQuaternion(new THREE.Quaternion());
+      let bestCandidate = localFaceCandidates[0];
+      let bestScore = -Infinity;
+
+      localFaceCandidates.forEach((candidate) => {
+        const worldNormal = candidate.normal.clone().applyQuaternion(cubeRotation);
+        const score = worldNormal.dot(targetNormal);
+        if (score > bestScore) {
+          bestScore = score;
+          bestCandidate = candidate;
+        }
+      });
+
+      return {
+        axis: bestCandidate.axis,
+        layer: bestCandidate.layer,
+        direction: -bestCandidate.layer
+      };
+    }
+
+    function getVisualTargetNormal(face) {
+      const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+      const cameraUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+      const cameraForward = camera.getWorldDirection(new THREE.Vector3()).normalize();
+
+      if (face === 'R') return cameraRight;
+      if (face === 'L') return cameraRight.negate();
+      if (face === 'U') return cameraUp;
+      if (face === 'D') return cameraUp.negate();
+      if (face === 'F') return cameraForward.negate();
+      return cameraForward;
+    }
+
     function moveFromDrag(face, cubie, dx, dy) {
       const def = faceDefs[face];
       if (!def || !cubie) return null;
@@ -598,11 +641,21 @@
     }
 
     function playNextMove() {
-      if (activeAnimation || queuedMoves.length === 0) return;
+      if (activeAnimation || wholeCubeAnimation || queuedMoves.length === 0) return;
       startLayerTurn(queuedMoves.shift());
     }
 
     function startLayerTurn(move) {
+      if (move.visualFace) {
+        const resolvedMove = resolveVisualFaceMove(move.face);
+        move = {
+          face: move.face,
+          axis: resolvedMove.axis,
+          layer: resolvedMove.layer,
+          direction: move.reverse ? -resolvedMove.direction : resolvedMove.direction
+        };
+      }
+
       const layerCubies = cubies.filter((cubie) => cubie.userData.coords[move.axis] === move.layer);
       if (layerCubies.length === 0) return;
 
@@ -706,7 +759,7 @@
 
     function formatMove(move) {
       const face = move.face || move.axis.toUpperCase();
-      const baseDirection = faceDefs[face]?.direction ?? 1;
+      const baseDirection = move.layer ? -move.layer : faceDefs[face]?.direction ?? 1;
       return move.direction === baseDirection ? face : `${face}'`;
     }
 
@@ -761,7 +814,11 @@
         if (progress >= 1 - EPSILON) {
           rubikGroup.rotation[wholeCubeAnimation.axis] = wholeCubeAnimation.to;
           wholeCubeAnimation = null;
-          if (!activeAnimation && queuedMoves.length === 0) setStatus('Готов к ходу');
+          if (!activeAnimation && queuedMoves.length === 0) {
+            setStatus('Готов к ходу');
+          } else {
+            playNextMove();
+          }
         }
       }
     }
