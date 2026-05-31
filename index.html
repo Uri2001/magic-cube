@@ -380,9 +380,9 @@
     renderer.domElement.addEventListener('pointercancel', handlePointerUp);
 
     function initLights() {
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x253044, 2.1));
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x253044, 1.35));
 
-      const keyLight = new THREE.DirectionalLight(0xffffff, 3.8);
+      const keyLight = new THREE.DirectionalLight(0xffffff, 2.25);
       keyLight.position.set(4, 6, 5);
       keyLight.castShadow = true;
       keyLight.shadow.mapSize.set(1024, 1024);
@@ -394,7 +394,7 @@
       keyLight.shadow.camera.bottom = -7;
       scene.add(keyLight);
 
-      const fillLight = new THREE.DirectionalLight(0x8fc6ff, 1.4);
+      const fillLight = new THREE.DirectionalLight(0x8fc6ff, 0.78);
       fillLight.position.set(-5, 3, -4);
       scene.add(fillLight);
 
@@ -471,15 +471,14 @@
     function createSticker(color, normal) {
       const sticker = new THREE.Mesh(
         new THREE.PlaneGeometry(STICKER_SIZE, STICKER_SIZE),
-        new THREE.MeshStandardMaterial({
+        new THREE.MeshBasicMaterial({
           color,
-          roughness: 0.42,
-          metalness: 0.03,
-          side: THREE.DoubleSide
+          side: THREE.DoubleSide,
+          toneMapped: false
         })
       );
       sticker.castShadow = false;
-      sticker.receiveShadow = true;
+      sticker.receiveShadow = false;
 
       if (Math.abs(normal.x) === 1) {
         sticker.rotation.y = normal.x > 0 ? Math.PI / 2 : -Math.PI / 2;
