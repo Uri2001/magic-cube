@@ -298,7 +298,7 @@
     const STICKER_OFFSET = CUBIE_SIZE / 2 + 0.006;
     const TURN_DURATION = 260;
     const WHOLE_TURN_DURATION = 240;
-    const DRAG_THRESHOLD = 9;
+    const DRAG_THRESHOLD = 7;
     const EPSILON = 0.00001;
 
     const faceDefs = {
@@ -359,7 +359,7 @@
     scene.add(rubikGroup);
 
     const cubies = [];
-    const stickerMeshes = [];
+    const pickableMeshes = [];
     const clock = new THREE.Clock();
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -367,9 +367,11 @@
       active: false,
       startX: 0,
       startY: 0,
-      face: null,
       cubie: null,
-      consumed: false
+      localPoint: null,
+      localNormal: null,
+      pointerId: null,
+      controlsWasEnabled: true
     };
 
     let activeAnimation = null;
@@ -386,9 +388,8 @@
     window.addEventListener('resize', resizeRenderer);
     window.addEventListener('keydown', handleKeydown);
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
-    renderer.domElement.addEventListener('pointermove', handlePointerMove);
     renderer.domElement.addEventListener('pointerup', handlePointerUp);
-    renderer.domElement.addEventListener('pointercancel', handlePointerUp);
+    renderer.domElement.addEventListener('pointercancel', cancelPointerDrag);
 
     function initLights() {
       scene.add(new THREE.HemisphereLight(0xffffff, 0x253044, 1.35));
@@ -443,7 +444,7 @@
         rubikGroup.remove(rubikGroup.children[0]);
       }
       cubies.length = 0;
-      stickerMeshes.length = 0;
+      pickableMeshes.length = 0;
       queuedMoves = [];
       activeAnimation = null;
     }
@@ -463,6 +464,9 @@
       );
       body.castShadow = true;
       body.receiveShadow = true;
+      body.userData.cubie = cubie;
+      body.userData.pickableBody = true;
+      pickableMeshes.push(body);
       cubie.add(body);
 
       Object.entries(faceDefs).forEach(([faceName, def]) => {
@@ -472,7 +476,8 @@
         const sticker = createSticker(def.color, def.normal);
         sticker.userData.face = faceName;
         sticker.userData.cubie = cubie;
-        stickerMeshes.push(sticker);
+        sticker.userData.pickableSticker = true;
+        pickableMeshes.push(sticker);
         cubie.add(sticker);
       });
 
@@ -539,45 +544,80 @@
     }
 
     function handlePointerDown(event) {
-      if (event.button !== 0 || activeAnimation) return;
-      const hit = pickSticker(event.clientX, event.clientY);
+      if (event.button !== 0 || dragState.active || activeAnimation || wholeCubeAnimation) return;
+      const hit = pickCubeSurface(event.clientX, event.clientY);
       if (!hit) return;
+      event.preventDefault();
+
+      rubikGroup.updateMatrixWorld(true);
+      hit.object.updateMatrixWorld(true);
 
       dragState.active = true;
       dragState.startX = event.clientX;
       dragState.startY = event.clientY;
-      dragState.face = hit.object.userData.face;
       dragState.cubie = hit.object.userData.cubie;
-      dragState.consumed = false;
+      dragState.localPoint = rubikGroup.worldToLocal(hit.point.clone());
+      dragState.localNormal = hit.localNormal;
+      dragState.pointerId = event.pointerId;
+      dragState.controlsWasEnabled = controls.enabled;
+      controls.enabled = false;
+      renderer.domElement.setPointerCapture(event.pointerId);
     }
 
-    function handlePointerMove(event) {
-      if (!dragState.active || dragState.consumed || activeAnimation) return;
-
+    function handlePointerUp(event) {
+      if (!dragState.active || event.pointerId !== dragState.pointerId) return;
+      event.preventDefault();
       const dx = event.clientX - dragState.startX;
       const dy = event.clientY - dragState.startY;
-      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-
-      const move = moveFromDrag(dragState.face, dragState.cubie, dx, dy);
-      if (move) {
-        dragState.consumed = true;
-        enqueueMove(move);
+      if (Math.hypot(dx, dy) >= DRAG_THRESHOLD && !activeAnimation) {
+        const move = moveFromDrag(
+          dragState.cubie,
+          dragState.localPoint,
+          dragState.localNormal,
+          event.clientX,
+          event.clientY,
+          dx,
+          dy
+        );
+        if (move) enqueueMove(move);
       }
+      resetPointerDrag(event.pointerId);
     }
 
-    function handlePointerUp() {
+    function cancelPointerDrag(event) {
+      if (!dragState.active || event.pointerId !== dragState.pointerId) return;
+      resetPointerDrag(event.pointerId);
+    }
+
+    function resetPointerDrag(pointerId) {
+      if (pointerId !== null && renderer.domElement.hasPointerCapture(pointerId)) {
+        renderer.domElement.releasePointerCapture(pointerId);
+      }
+      controls.enabled = dragState.controlsWasEnabled;
       dragState.active = false;
-      dragState.face = null;
       dragState.cubie = null;
-      dragState.consumed = false;
+      dragState.localPoint = null;
+      dragState.localNormal = null;
+      dragState.pointerId = null;
     }
 
-    function pickSticker(clientX, clientY) {
+    function pickCubeSurface(clientX, clientY) {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
-      return raycaster.intersectObjects(stickerMeshes, false)[0] ?? null;
+      const hits = raycaster.intersectObjects(pickableMeshes, false);
+
+      for (const hit of hits) {
+        const cubie = hit.object.userData.cubie;
+        const localNormal = hitLocalNormal(hit);
+        if (!cubie || !localNormal) continue;
+        if (cubie.userData.coords[localNormal.axis] !== localNormal.sign) continue;
+        hit.localNormal = localNormal;
+        return hit;
+      }
+
+      return null;
     }
 
     function resolveVisualFaceMove(face) {
@@ -616,33 +656,117 @@
       return cameraForward;
     }
 
-    function moveFromDrag(face, cubie, dx, dy) {
-      const def = faceDefs[face];
-      if (!def || !cubie) return null;
+    function moveFromDrag(cubie, localPoint, localNormal, clientX, clientY, dx, dy) {
+      if (!cubie || !localPoint || !localNormal) return null;
 
-      const primaryHorizontal = Math.abs(dx) >= Math.abs(dy);
-      const sign = primaryHorizontal ? Math.sign(dx) : Math.sign(dy);
-      const coords = cubie.userData.coords;
-      let axis = def.axis;
-      let direction = def.direction * sign;
+      const localDragVector = localDragFromPointer(localPoint, localNormal, clientX, clientY);
+      const screenDragVector = localDragVector ? null : new THREE.Vector2(dx, dy).normalize();
 
-      if (def.axis === 'z') {
-        axis = primaryHorizontal ? 'y' : 'x';
-        direction = primaryHorizontal ? -sign : sign;
-      } else if (def.axis === 'y') {
-        axis = primaryHorizontal ? 'z' : 'x';
-        direction = primaryHorizontal ? sign : -sign;
-      } else if (def.axis === 'x') {
-        axis = primaryHorizontal ? 'z' : 'y';
-        direction = primaryHorizontal ? -sign : sign;
-      }
+      const candidateAxes = ['x', 'y', 'z'].filter((axis) => axis !== localNormal.axis);
+      let bestMove = null;
+      let bestScore = -Infinity;
 
-      return {
-        face,
-        axis,
-        layer: coords[axis],
-        direction: normalizeDirection(direction)
-      };
+      candidateAxes.forEach((axis) => {
+        [-1, 1].forEach((direction) => {
+          const score = localDragVector
+            ? localTurnScore(localPoint, axis, direction, localDragVector)
+            : projectedTurnScore(localPoint, axis, direction, screenDragVector);
+          if (score > bestScore) {
+            bestScore = score;
+            bestMove = {
+              face: faceFromLayer(axis, cubie.userData.coords[axis]),
+              axis,
+              layer: cubie.userData.coords[axis],
+              direction
+            };
+          }
+        });
+      });
+
+      return bestMove;
+    }
+
+    function localDragFromPointer(localPoint, localNormal, clientX, clientY) {
+      const localNormalVector = axisVector(localNormal.axis, localNormal.sign);
+      const worldNormal = localNormalVector.clone()
+        .applyQuaternion(rubikGroup.getWorldQuaternion(new THREE.Quaternion()))
+        .normalize();
+      const worldPoint = rubikGroup.localToWorld(localPoint.clone());
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(worldNormal, worldPoint);
+      const ray = pointerRay(clientX, clientY);
+      const endWorldPoint = ray.intersectPlane(plane, new THREE.Vector3());
+      if (!endWorldPoint) return null;
+
+      const endLocalPoint = rubikGroup.worldToLocal(endWorldPoint.clone());
+      const dragVector = endLocalPoint.sub(localPoint);
+      dragVector.addScaledVector(localNormalVector, -dragVector.dot(localNormalVector));
+      return dragVector.lengthSq() > 0.0001 ? dragVector.normalize() : null;
+    }
+
+    function localTurnScore(localPoint, axis, direction, dragVector) {
+      const turnTangent = new THREE.Vector3()
+        .crossVectors(cubeAxes[axis], localPoint)
+        .multiplyScalar(normalizeDirection(direction));
+      if (turnTangent.lengthSq() < 0.0001) return -Infinity;
+      return turnTangent.normalize().dot(dragVector);
+    }
+
+    function projectedTurnScore(localPoint, axis, direction, dragVector) {
+      const start = projectLocalPoint(localPoint);
+      const nextLocalPoint = localPoint.clone().applyAxisAngle(
+        cubeAxes[axis],
+        normalizeDirection(direction) * Math.PI / 16
+      );
+      const end = projectLocalPoint(nextLocalPoint);
+      const projected = end.sub(start);
+      if (projected.lengthSq() < 0.01) return -Infinity;
+      return projected.normalize().dot(dragVector);
+    }
+
+    function projectLocalPoint(localPoint) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const projected = rubikGroup.localToWorld(localPoint.clone()).project(camera);
+      return new THREE.Vector2(
+        ((projected.x + 1) / 2) * rect.width,
+        ((1 - projected.y) / 2) * rect.height
+      );
+    }
+
+    function dominantAxis(vector) {
+      const values = { x: Math.abs(vector.x), y: Math.abs(vector.y), z: Math.abs(vector.z) };
+      let axis = 'x';
+      if (values.y > values[axis]) axis = 'y';
+      if (values.z > values[axis]) axis = 'z';
+      return { axis, sign: Math.sign(vector[axis]) || 1 };
+    }
+
+    function axisVector(axis, sign = 1) {
+      return cubeAxes[axis].clone().multiplyScalar(sign);
+    }
+
+    function pointerRay(clientX, clientY) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      return raycaster.ray.clone();
+    }
+
+    function hitLocalNormal(hit) {
+      if (!hit.face) return null;
+      const cubeQuaternion = rubikGroup.getWorldQuaternion(new THREE.Quaternion());
+      const inverseCubeQuaternion = cubeQuaternion.clone().invert();
+      const objectQuaternion = hit.object.getWorldQuaternion(new THREE.Quaternion());
+      const normal = hit.face.normal.clone()
+        .applyQuaternion(objectQuaternion)
+        .applyQuaternion(inverseCubeQuaternion)
+        .normalize();
+      return dominantAxis(normal);
+    }
+
+    function faceFromLayer(axis, layer) {
+      const match = Object.entries(faceDefs).find(([, def]) => def.axis === axis && def.layer === layer);
+      return match ? match[0] : axis.toUpperCase();
     }
 
     function enqueueMove(move) {
@@ -765,6 +889,7 @@
     }
 
     function resetCube() {
+      if (dragState.active) resetPointerDrag(dragState.pointerId);
       queuedMoves.length = 0;
       activeAnimation = null;
       wholeCubeAnimation = null;
