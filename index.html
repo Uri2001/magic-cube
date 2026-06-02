@@ -245,8 +245,8 @@
   <script type="importmap">
     {
       "imports": {
-        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+        "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/"
       }
     }
   </script>
@@ -336,7 +336,6 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setAnimationLoop(render);
     app.appendChild(renderer.domElement);
 
     const controls = new TrackballControls(camera, renderer.domElement);
@@ -358,7 +357,7 @@
 
     const cubies = [];
     const pickableMeshes = [];
-    const clock = new THREE.Clock();
+    const timer = new THREE.Timer();
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const dragState = {
@@ -378,6 +377,7 @@
 
     initLights();
     buildCube();
+    renderer.setAnimationLoop(render);
     loading.classList.add('hidden');
     setStatus('Готов к ходу');
 
@@ -912,9 +912,9 @@
       camera.up.set(0, 1, 0);
       controls.target.set(0, 0, 0);
       camera.lookAt(controls.target);
-      controls.position0.copy(camera.position);
-      controls.target0.copy(controls.target);
-      controls.up0.copy(camera.up);
+      if (typeof controls.saveState === 'function') {
+        controls.saveState();
+      }
       controls.reset();
       controls.handleResize();
       controls.update();
@@ -954,7 +954,8 @@
     }
 
     function render() {
-      const delta = Math.min(clock.getDelta(), 0.05);
+      timer.update();
+      const delta = Math.min(timer.getDelta(), 0.05);
       updateAnimations(delta);
       controls.update();
       renderer.render(scene, camera);
