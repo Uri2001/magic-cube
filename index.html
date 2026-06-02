@@ -3,6 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c1017">
+  <meta name="application-name" content="Magic Cube">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Magic Cube">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Magic Cube</title>
   <link rel="icon" href="data:,">
   <style>
@@ -242,6 +247,44 @@
       }
     }
   </style>
+  <script>
+    (() => {
+      const iconSvg = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+          <rect width="512" height="512" rx="96" fill="#0c1017"/>
+          <path d="M256 76 403 161v170L256 416 109 331V161Z" fill="#111318" stroke="#4dd2ff" stroke-width="16" stroke-linejoin="round"/>
+          <path d="m256 76 147 85-147 85-147-85Z" fill="#f4f7fb"/>
+          <path d="M109 161v170l147 85V246Z" fill="#2878e6"/>
+          <path d="M403 161v170l-147 85V246Z" fill="#23a455"/>
+          <path d="M109 218 256 303l147-85M109 275l147 85 147-85M158 132v170M207 104v170M305 104v170M354 132v170" fill="none" stroke="#111318" stroke-width="10" stroke-linecap="round"/>
+        </svg>`;
+      const iconUrl = `data:image/svg+xml,${encodeURIComponent(iconSvg.trim())}`;
+      const appUrl = new URL('index.html', window.location.href).href;
+      const appScope = new URL('./', window.location.href).href;
+      const manifest = {
+        name: 'Magic Cube',
+        short_name: 'Magic Cube',
+        description: 'Interactive 3D Rubik cube built with Three.js.',
+        id: appUrl,
+        start_url: appUrl,
+        scope: appScope,
+        display: 'standalone',
+        background_color: '#0c1017',
+        theme_color: '#0c1017',
+        icons: [
+          { src: iconUrl, sizes: '192x192', type: 'image/svg+xml', purpose: 'any maskable' },
+          { src: iconUrl, sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+        ]
+      };
+      const manifestUrl = URL.createObjectURL(
+        new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' })
+      );
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = manifestUrl;
+      document.head.appendChild(link);
+    })();
+  </script>
   <script type="importmap">
     {
       "imports": {
@@ -383,6 +426,7 @@
 
     scrambleBtn.addEventListener('click', () => scrambleCube());
     resetBtn.addEventListener('click', () => resetCube());
+    window.addEventListener('appinstalled', handleAppInstalled);
     window.addEventListener('resize', resizeRenderer);
     window.addEventListener('keydown', handleKeydown);
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
@@ -882,6 +926,10 @@
 
     function setStatus(text) {
       statusEl.textContent = text;
+    }
+
+    function handleAppInstalled() {
+      setStatus('Приложение установлено');
     }
 
     function easeInOutCubic(t) {
