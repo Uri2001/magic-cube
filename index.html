@@ -341,6 +341,7 @@
     const STICKER_OFFSET = CUBIE_SIZE / 2 + 0.006;
     const TURN_DURATION = 260;
     const WHOLE_TURN_DURATION = 240;
+    const DRAG_FINISH_DURATION = 150;
     const DRAG_THRESHOLD = 7;
     const EPSILON = 0.00001;
 
@@ -411,7 +412,10 @@
       localPoint: null,
       localNormal: null,
       pointerId: null,
-      controlsWasEnabled: true
+      controlsWasEnabled: true,
+      move: null,
+      animation: null,
+      currentAngle: 0
     };
 
     let activeAnimation = null;
@@ -430,6 +434,7 @@
     window.addEventListener('resize', resizeRenderer);
     window.addEventListener('keydown', handleKeydown);
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+    renderer.domElement.addEventListener('pointermove', handlePointerMove);
     renderer.domElement.addEventListener('pointerup', handlePointerUp);
     renderer.domElement.addEventListener('pointercancel', cancelPointerDrag);
 
@@ -579,12 +584,14 @@
       renderer.domElement.setPointerCapture(event.pointerId);
     }
 
-    function handlePointerUp(event) {
+    function handlePointerMove(event) {
       if (!dragState.active || event.pointerId !== dragState.pointerId) return;
       event.preventDefault();
+
       const dx = event.clientX - dragState.startX;
       const dy = event.clientY - dragState.startY;
-      if (Math.hypot(dx, dy) >= DRAG_THRESHOLD && !activeAnimation) {
+      if (!dragState.animation) {
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD || activeAnimation) return;
         const move = moveFromDrag(
           dragState.cubie,
           dragState.localPoint,
@@ -594,14 +601,37 @@
           dx,
           dy
         );
-        if (move) enqueueMove(move);
+        if (!move) return;
+
+        const animation = beginDragLayerTurn(move);
+        if (!animation) return;
+        dragState.move = animation.move;
+        dragState.animation = animation;
       }
-      resetPointerDrag(event.pointerId);
+
+      updateDragLayerTurn(event.clientX, event.clientY);
+    }
+
+    function handlePointerUp(event) {
+      if (!dragState.active || event.pointerId !== dragState.pointerId) return;
+      event.preventDefault();
+      completePointerDrag(event.pointerId);
     }
 
     function cancelPointerDrag(event) {
       if (!dragState.active || event.pointerId !== dragState.pointerId) return;
-      resetPointerDrag(event.pointerId);
+      completePointerDrag(event.pointerId);
+    }
+
+    function completePointerDrag(pointerId) {
+      const animation = dragState.animation;
+      if (animation) {
+        animation.mode = 'dragFinish';
+        animation.elapsed = 0;
+        animation.finishStartAngle = dragState.currentAngle;
+        animation.targetAngle = normalizeDirection(animation.move.direction) * Math.PI / 2;
+      }
+      resetPointerDrag(pointerId);
     }
 
     function resetPointerDrag(pointerId) {
@@ -614,6 +644,9 @@
       dragState.localPoint = null;
       dragState.localNormal = null;
       dragState.pointerId = null;
+      dragState.move = null;
+      dragState.animation = null;
+      dragState.currentAngle = 0;
     }
 
     function pickCubeSurface(clientX, clientY) {
@@ -636,11 +669,22 @@
     }
 
     function resolveVisualFaceMove(face) {
+      const bestCandidate = resolveVisualFaceCandidate(face).candidate;
+
+      return {
+        axis: bestCandidate.axis,
+        layer: bestCandidate.layer,
+        direction: -bestCandidate.layer
+      };
+    }
+
+    function resolveVisualFaceCandidate(face) {
       rubikGroup.updateMatrixWorld(true);
       const targetNormal = getVisualTargetNormal(face);
       const cubeRotation = rubikGroup.getWorldQuaternion(new THREE.Quaternion());
       let bestCandidate = localFaceCandidates[0];
-      let bestScore = -Infinity;
+      let bestWorldNormal = bestCandidate.normal.clone().applyQuaternion(cubeRotation);
+      let bestScore = bestWorldNormal.dot(targetNormal);
 
       localFaceCandidates.forEach((candidate) => {
         const worldNormal = candidate.normal.clone().applyQuaternion(cubeRotation);
@@ -648,13 +692,13 @@
         if (score > bestScore) {
           bestScore = score;
           bestCandidate = candidate;
+          bestWorldNormal = worldNormal;
         }
       });
 
       return {
-        axis: bestCandidate.axis,
-        layer: bestCandidate.layer,
-        direction: -bestCandidate.layer
+        candidate: bestCandidate,
+        worldNormal: bestWorldNormal.normalize()
       };
     }
 
@@ -674,7 +718,8 @@
     function moveFromDrag(cubie, localPoint, localNormal, clientX, clientY, dx, dy) {
       if (!cubie || !localPoint || !localNormal) return null;
 
-      const localDragVector = localDragFromPointer(localPoint, localNormal, clientX, clientY);
+      const rawLocalDragVector = localDragFromPointer(localPoint, localNormal, clientX, clientY);
+      const localDragVector = rawLocalDragVector?.normalize();
       const screenDragVector = localDragVector ? null : new THREE.Vector2(dx, dy).normalize();
 
       const candidateAxes = ['x', 'y', 'z'].filter((axis) => axis !== localNormal.axis);
@@ -701,6 +746,45 @@
       return bestMove;
     }
 
+    function updateDragLayerTurn(clientX, clientY) {
+      const animation = dragState.animation;
+      if (!animation) return;
+
+      const dragVector = localDragFromPointer(
+        dragState.localPoint,
+        dragState.localNormal,
+        clientX,
+        clientY
+      );
+      const angle = dragVector
+        ? liveDragAngle(dragVector, dragState.localPoint, animation.move)
+        : dragState.currentAngle;
+
+      dragState.currentAngle = angle;
+      animation.currentAngle = angle;
+      animation.group.rotation[animation.move.axis] = angle;
+    }
+
+    function liveDragAngle(dragVector, localPoint, move) {
+      const direction = normalizeDirection(move.direction);
+      const tangent = new THREE.Vector3()
+        .crossVectors(cubeAxes[move.axis], localPoint)
+        .multiplyScalar(direction);
+      if (tangent.lengthSq() < 0.0001) return 0;
+
+      const radius = distanceFromAxis(localPoint, move.axis);
+      if (radius < 0.0001) return 0;
+
+      const unsignedAngle = Math.max(0, dragVector.dot(tangent.normalize()) / radius);
+      return THREE.MathUtils.clamp(unsignedAngle, 0, Math.PI / 2) * direction;
+    }
+
+    function distanceFromAxis(point, axis) {
+      if (axis === 'x') return Math.hypot(point.y, point.z);
+      if (axis === 'y') return Math.hypot(point.x, point.z);
+      return Math.hypot(point.x, point.y);
+    }
+
     function localDragFromPointer(localPoint, localNormal, clientX, clientY) {
       const localNormalVector = axisVector(localNormal.axis, localNormal.sign);
       const worldNormal = localNormalVector.clone()
@@ -715,7 +799,7 @@
       const endLocalPoint = rubikGroup.worldToLocal(endWorldPoint.clone());
       const dragVector = endLocalPoint.sub(localPoint);
       dragVector.addScaledVector(localNormalVector, -dragVector.dot(localNormalVector));
-      return dragVector.lengthSq() > 0.0001 ? dragVector.normalize() : null;
+      return dragVector.lengthSq() > 0.0001 ? dragVector : null;
     }
 
     function localTurnScore(localPoint, axis, direction, dragVector) {
@@ -795,6 +879,23 @@
     }
 
     function startLayerTurn(move) {
+      const animation = createLayerTurnAnimation(move, 'timed');
+      if (!animation) return;
+
+      activeAnimation = animation;
+      setStatus(`Ход ${formatMove(animation.move)}`);
+    }
+
+    function beginDragLayerTurn(move) {
+      const animation = createLayerTurnAnimation(move, 'drag');
+      if (!animation) return null;
+
+      activeAnimation = animation;
+      setStatus(`Ход ${formatMove(animation.move)}`);
+      return animation;
+    }
+
+    function createLayerTurnAnimation(move, mode) {
       if (move.visualFace) {
         const resolvedMove = resolveVisualFaceMove(move.face);
         move = {
@@ -806,21 +907,22 @@
       }
 
       const layerCubies = cubies.filter((cubie) => cubie.userData.coords[move.axis] === move.layer);
-      if (layerCubies.length === 0) return;
+      if (layerCubies.length === 0) return null;
 
       const turnGroup = new THREE.Group();
       rubikGroup.add(turnGroup);
       layerCubies.forEach((cubie) => turnGroup.attach(cubie));
 
-      activeAnimation = {
+      return {
+        mode,
         move,
         group: turnGroup,
         cubies: layerCubies,
         elapsed: 0,
+        currentAngle: 0,
+        finishStartAngle: 0,
         targetAngle: normalizeDirection(move.direction) * Math.PI / 2
       };
-
-      setStatus(`Ход ${formatMove(move)}`);
     }
 
     function finishLayerTurn(animation) {
@@ -873,12 +975,13 @@
 
     function rotateWholeCube(axis, direction) {
       if (wholeCubeAnimation) return;
+      const visualAxis = getVisualWholeCubeAxis(axis);
       const delta = new THREE.Quaternion().setFromAxisAngle(
-        cubeAxes[axis],
+        visualAxis,
         normalizeDirection(direction) * Math.PI / 2
       );
       const from = rubikGroup.quaternion.clone();
-      const to = from.clone().multiply(delta).normalize();
+      const to = from.clone().premultiply(delta).normalize();
       wholeCubeAnimation = {
         axis,
         from,
@@ -886,6 +989,11 @@
         elapsed: 0
       };
       setStatus(`Поворот куба ${axis.toUpperCase()}`);
+    }
+
+    function getVisualWholeCubeAxis(axis) {
+      const faceByAxis = { x: 'R', y: 'U', z: 'F' };
+      return resolveVisualFaceCandidate(faceByAxis[axis]).worldNormal;
     }
 
     function scrambleCube() {
@@ -970,13 +1078,25 @@
 
     function updateAnimations(delta) {
       if (activeAnimation) {
-        activeAnimation.elapsed += delta * 1000;
-        const progress = Math.min(activeAnimation.elapsed / TURN_DURATION, 1);
-        activeAnimation.group.rotation[activeAnimation.move.axis] =
-          activeAnimation.targetAngle * easeInOutCubic(progress);
+        if (activeAnimation.mode !== 'drag') {
+          activeAnimation.elapsed += delta * 1000;
+          const duration = activeAnimation.mode === 'dragFinish' ? DRAG_FINISH_DURATION : TURN_DURATION;
+          const progress = Math.min(activeAnimation.elapsed / duration, 1);
+          if (activeAnimation.mode === 'dragFinish') {
+            activeAnimation.currentAngle = THREE.MathUtils.lerp(
+              activeAnimation.finishStartAngle,
+              activeAnimation.targetAngle,
+              easeInOutCubic(progress)
+            );
+            activeAnimation.group.rotation[activeAnimation.move.axis] = activeAnimation.currentAngle;
+          } else {
+            activeAnimation.group.rotation[activeAnimation.move.axis] =
+              activeAnimation.targetAngle * easeInOutCubic(progress);
+          }
 
-        if (progress >= 1 - EPSILON) {
-          finishLayerTurn(activeAnimation);
+          if (progress >= 1 - EPSILON) {
+            finishLayerTurn(activeAnimation);
+          }
         }
       }
 
